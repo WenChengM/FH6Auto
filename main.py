@@ -1235,7 +1235,7 @@ class FH_UltimateBot(ctk.CTk):
                 time.sleep(0.4)
                 return True
 
-            self.log(f"未识别到菜单锚点，按 ESC 重试 ({i + 1}/100)")
+            self.log(f"未识别到菜单锚点，正在重试 ({i + 1}/100)")
             self.hw_press("esc")
             time.sleep(0.6)
 
@@ -1532,45 +1532,43 @@ class FH_UltimateBot(ctk.CTk):
     def find_image_with_element(self, main_path, sub_path, region=None, threshold=0.85, fast_mode=True):
         if not self.is_running:
             return None
-
         try:
             screen_bgr = self.capture_region(region)
             scales_to_try = self.get_scales_to_try(fast_mode=fast_mode)
-
             for scale in scales_to_try:
+                # 1. 结合新架构缓存直接读取缩放好的图像
                 main_tpl_c, _ = self.get_scaled_template(main_path, scale)
                 sub_tpl_c, _ = self.get_scaled_template(sub_path, scale)
-
                 if main_tpl_c is None or sub_tpl_c is None:
                     continue
-
                 h_m, w_m = main_tpl_c.shape[:2]
-                if h_m < 5 or w_m < 5:
+                if h_m < 5 or w_m < 5 or h_m > screen_bgr.shape[0] or w_m > screen_bgr.shape[1]:
                     continue
-                if h_m > screen_bgr.shape[0] or w_m > screen_bgr.shape[1]:
-                    continue
-
+                # 2. 一阶匹配：寻找全屏符合的主目标
                 res_main = cv2.matchTemplate(screen_bgr, main_tpl_c, cv2.TM_CCOEFF_NORMED)
                 loc = np.where(res_main >= threshold)
-
+                checked = set() # 【关键优化】：坐标去重，解决几十万次无效循环造成的卡顿
                 for pt in zip(*loc[::-1]):
                     x, y = pt
-
+                    # 过滤相邻 10 个像素内的重复识别点
+                    key = (x // 10, y // 10)
+                    if key in checked:
+                        continue
+                    checked.add(key)
+                    # 3. 旧代码的核心精髓：在主图区域四周略微扩大 5 像素的范围内找元素
                     sub_roi = screen_bgr[
                         max(0, y - 5):min(screen_bgr.shape[0], y + h_m + 5),
                         max(0, x - 5):min(screen_bgr.shape[1], x + w_m + 5),
                     ]
-
                     if sub_tpl_c.shape[0] > sub_roi.shape[0] or sub_tpl_c.shape[1] > sub_roi.shape[1]:
                         continue
-
+                    # 4. 二阶匹配：验证提取范围内是否包含子元素
                     res_sub = cv2.matchTemplate(sub_roi, sub_tpl_c, cv2.TM_CCOEFF_NORMED)
                     if cv2.minMaxLoc(res_sub)[1] >= threshold:
                         return (
                             x + w_m // 2 + (region[0] if region else 0),
                             y + h_m // 2 + (region[1] if region else 0),
                         )
-
             return None
         except Exception as e:
             self.log(f"find_image_with_element 异常: {e}")
@@ -2604,8 +2602,8 @@ class FH_UltimateBot(ctk.CTk):
                     "newCC.png",
                     "newcartag.png",
                     region=self.regions["全界面"],
-                    threshold=0.85,
-                    fast_mode=True
+                    threshold=0.76,     # 调低阈值包容标签遮挡
+                    fast_mode=False     # 释放多重缩放火力
                 )
                 if pos_target:
                     self.game_click(pos_target)
@@ -2690,19 +2688,6 @@ class FH_UltimateBot(ctk.CTk):
                     self.hw_press("enter")
                     time.sleep(1.2)
 
-                if self.find_image("SPNE.png", region=self.regions["全界面"], threshold=0.7, fast_mode=True):
-                    self.log("已无技能点或技能已点完。")
-                    time.sleep(1.0)
-                    self.hw_press("enter")
-                    time.sleep(0.8)
-                    self.hw_press("esc")
-                    time.sleep(1.0)
-                    self.hw_press("esc")
-                    time.sleep(1.0)
-                    self.hw_press("esc")
-                    time.sleep(1.0)
-                    return True
-
                 self.cj_counter += 1
                 self.update_running_ui("超级抽奖", self.cj_counter, target_count)
 
@@ -2784,24 +2769,25 @@ class FH_UltimateBot(ctk.CTk):
         time.sleep(0.8)
         pydirectinput.moveTo(10, 10)
         pydirectinput.move(1, 1)
-
-        pos_buycar = self.wait_for_image(
-            "BNandUC.png",
+        pos = None
+        pos = self.wait_for_image(
+            "rc.png",
             region=self.regions["中间"],
             threshold=0.75,
-            timeout=15,
-            interval=0.3,
+            timeout=3,
+            interval=0.2,
             fast_mode=True
         )
-        if pos_buycar:
-            self.log("找到 BNandUC.png，执行点击")
-            self.safe_click(*pos_buycar)
+        if pos:
+            #self.log("找到 rc.png，执行点击")
+            self.safe_click(pos)
         else:
-            self.log("未找到 BNandUC.png，按 ESC")
+            self.log("该车辆已经驾驶")
             self.hw_press("esc")
             time.sleep(2.0)
             self.hw_press("esc")
         time.sleep(2.0)
+
         found = False
         for i in range(30):
             if not self.is_running:
@@ -2815,14 +2801,14 @@ class FH_UltimateBot(ctk.CTk):
                 fast_mode=True
             )
             if pos:
-                self.log(f"第 {i + 1} 次检测到 buyandsell，进入车辆界面")
+                self.log(f"第 {i + 1} 次检测到购买与出售，进入车辆界面")
                 self.hw_press("enter")
                 found = True
                 break
-            self.log(f"第 {i + 1} 次未检测到 buyandsell，等待后重试")
+            self.log(f"第 {i + 1} 次未检测到购买与出售，等待后重试")
             time.sleep(1.0)
         if not found:
-            self.log("30次内未找到 buyandsell 标识")
+            self.log("30次内未找到购买与出售")
             return False
         
         time.sleep(1.5)
